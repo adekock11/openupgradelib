@@ -125,6 +125,24 @@ else:
     from tools.yaml_import import yaml_import
 
 
+def _import_convert_functions():
+    """Return ``(convert_csv_import, convert_xml_import)`` for this series.
+
+    Odoo 20 stopped re-exporting both names from ``odoo.tools``
+    (odoo/odoo@ec785ba758). The functions still live in
+    ``odoo.tools.convert``. Older Odoo and OpenERP versions expose them
+    on the tools package, whose top-level package is ``openerp`` before 10.0.
+    """
+    if version_info[0] >= 20:
+        from odoo.tools.convert import convert_csv_import, convert_xml_import
+
+        return convert_csv_import, convert_xml_import
+    return tools.convert_csv_import, tools.convert_xml_import
+
+
+_convert_csv_import, _convert_xml_import = _import_convert_functions()
+
+
 def do_raise(error):
     if UserError:
         raise UserError(error)
@@ -404,14 +422,14 @@ def load_data(
     try:
         if ext == ".csv":
             noupdate = True
-            tools.convert_csv_import(
+            _convert_csv_import(
                 env_or_cr, module_name, pathname, fp.read(), idref, mode, noupdate
             )
         elif ext == ".yml":
             yaml_import(cr, module_name, fp, None, idref=idref, mode=mode)
         elif mode == "init_no_create":
             for fp2 in _get_existing_records(cr, fp, module_name):
-                tools.convert_xml_import(
+                _convert_xml_import(
                     env_or_cr,
                     module_name,
                     fp2,
@@ -419,7 +437,7 @@ def load_data(
                     mode="init",
                 )
         else:
-            tools.convert_xml_import(
+            _convert_xml_import(
                 env_or_cr,
                 module_name,
                 fp

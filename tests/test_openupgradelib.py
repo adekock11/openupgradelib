@@ -192,6 +192,77 @@ class TestOpenupgradelib(unittest.TestCase):
             self.assertEqual(admin_user.name, "Administrator")
             self.assertIn("original signature", admin_user.signature)
 
+    def test_import_convert_functions(self):
+        """Odoo 20 no longer re-exports the convert helpers from odoo.tools."""
+        from odoo.tools.convert import convert_csv_import, convert_xml_import
+
+        saved = openupgrade.version_info
+        try:
+            openupgrade.version_info = (20,) + tuple(saved[1:])
+            csv_fn, xml_fn = openupgrade._import_convert_functions()
+            self.assertIs(csv_fn, convert_csv_import)
+            self.assertIs(xml_fn, convert_xml_import)
+            if saved[0] < 20:
+                openupgrade.version_info = saved
+                csv_fn, xml_fn = openupgrade._import_convert_functions()
+                self.assertIs(csv_fn, odoo.tools.convert_csv_import)
+                self.assertIs(xml_fn, odoo.tools.convert_xml_import)
+            else:
+                self.assertRaises(
+                    AttributeError, getattr, odoo.tools, "convert_xml_import"
+                )
+                self.assertRaises(
+                    AttributeError, getattr, odoo.tools, "convert_csv_import"
+                )
+        finally:
+            openupgrade.version_info = saved
+        csv_fn, xml_fn = openupgrade._import_convert_functions()
+        self.assertIs(openupgrade._convert_csv_import, csv_fn)
+        self.assertIs(openupgrade._convert_xml_import, xml_fn)
+
+    def test_load_data_uses_resolved_xml_import(self):
+        env_or_cr = self.env if openupgrade.version_info[0] > 16 else self.cr
+
+        def patched_file_open(path, *args, **kwargs):
+            result = StringIO(
+                """
+                <odoo>
+                    <record id="base.user_admin" model="res.users">
+                        <field name="name">Administrator</field>
+                    </record>
+                </odoo>
+                """
+            )
+            result.name = "dummy.xml"
+            return result
+
+        with mock.patch(
+            "odoo.tools.file_open", side_effect=patched_file_open
+        ), mock.patch("openupgradelib.openupgrade._convert_xml_import") as convert_xml:
+            openupgrade.load_data(env_or_cr, "dummy_module", "dummy.xml")
+        convert_xml.assert_called_once()
+        args, kwargs = convert_xml.call_args
+        self.assertEqual(args[0], env_or_cr)
+        self.assertEqual(args[1], "dummy_module")
+        self.assertEqual(args[3], {})
+        self.assertEqual(kwargs.get("mode"), "init")
+
+        leaf = StringIO("<record/>")
+        with mock.patch(
+            "odoo.tools.file_open", side_effect=patched_file_open
+        ), mock.patch(
+            "openupgradelib.openupgrade._convert_xml_import"
+        ) as convert_xml, mock.patch(
+            "openupgradelib.openupgrade._get_existing_records",
+            return_value=[leaf],
+        ):
+            openupgrade.load_data(
+                env_or_cr, "dummy_module", "dummy.xml", mode="init_no_create"
+            )
+        convert_xml.assert_called_once()
+        self.assertIs(convert_xml.call_args.args[2], leaf)
+        self.assertEqual(convert_xml.call_args.kwargs.get("mode"), "init")
+
     def test_disable_invalid_filters(self):
         invalid_filter = self.env["ir.filters"].create(
             {
