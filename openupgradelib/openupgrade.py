@@ -67,7 +67,9 @@ else:
 
 try:
     # since 18.0, Odoo checks for the signature of migration functions
-    # and raises if the parameter names are not contained here
+    # and raises if the parameter names are not contained here.
+    # Undecorated migrate(env, version) still needs this entry. @migrate()
+    # pins the wrapper to (cr, version); see _pin_migrate_signature.
     from odoo.modules.migration import VALID_MIGRATE_PARAMS
 
     # allow (env, version) signatures in migration methods
@@ -2604,6 +2606,31 @@ def logging(args_details=False, step=False):
     return wrap
 
 
+def _pin_migrate_signature(wrapper):
+    """Publish this wrapper as ``(cr, version)`` to ``inspect.signature``.
+
+    Odoo 18.0 through 20.0 reject a migration callable unless
+    ``inspect.signature`` reports positional parameters named ``cr`` or
+    ``_cr`` and ``version`` or ``_version`` (``odoo/modules/migration.py``,
+    ``exec_script``). ``functools.wraps`` sets ``__wrapped__``, which
+    ``inspect.signature`` follows, so ``migrate(env, version)`` is presented
+    as ``(env, version)`` and the loader raises ``TypeError``.
+
+    Assigning ``__signature__`` stops that unwrapping (``inspect.unwrap``).
+    The value is this wrapper's own parameters: every supported Odoo version
+    calls the wrapper that way. Interpreters without ``inspect.signature``
+    predate that check, so skipping the pin there is safe.
+    """
+    signature = getattr(inspect, "signature", None)
+    if signature is None:
+        return
+    try:
+        # follow_wrapped exists since Python 3.5, the oldest 3.x we install.
+        wrapper.__signature__ = signature(wrapper, follow_wrapped=False)
+    except (AttributeError, TypeError, ValueError):
+        return
+
+
 def migrate(no_version=False, use_env=None, uid=None, context=None):
     """
     This is the decorator for the migrate() function
@@ -2622,6 +2649,12 @@ def migrate(no_version=False, use_env=None, uid=None, context=None):
     `use_env` is `False` or not set and the version is below 10, or
     `func(env, version)` if `use_env` is `True` or not set and the version is
     10 or higher.
+
+    Odoo 18 and later (including 20.0) inspect the decorated callable and
+    accept it only when that inspection reports ``(cr, version)``. The
+    decorator keeps the wrapper's signature visible. Odoo calls the wrapper
+    with the cursor and the installed version; the wrapper still passes an
+    environment or a cursor on to the wrapped function as described above.
 
     Return when the `version` argument is not defined and `no_version` is
     False and log execeptions.
@@ -2689,6 +2722,7 @@ def migrate(no_version=False, use_env=None, uid=None, context=None):
                     logger.exception(exc)
                     raise
 
+        _pin_migrate_signature(wrapped_function)
         return wrapped_function
 
     return wrap

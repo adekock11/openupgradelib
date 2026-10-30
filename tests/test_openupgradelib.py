@@ -1,3 +1,5 @@
+import inspect
+import itertools
 import json
 import os
 import unittest
@@ -11,6 +13,21 @@ import odoo
 # needs to be imported after Odoo initialized, done in test setup
 openupgradelib = None
 openupgrade = None
+
+# Odoo 18.0, 19.0 and 20.0 share this allow-list (odoo/modules/migration.py).
+# It is the upstream list, not openupgradelib's ("env", "version") addition.
+_ODOO_MIGRATE_PARAMS = list(itertools.product(("cr", "_cr"), ("version", "_version")))
+
+
+def _accepted_by_odoo_migrate_loader(func):
+    """Return whether Odoo's exec_script() would accept ``func``."""
+    signature = inspect.signature(func)
+    names = tuple(signature.parameters.keys())
+    kinds_ok = all(
+        param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        for param in signature.parameters.values()
+    )
+    return names in _ODOO_MIGRATE_PARAMS and kinds_ok
 
 
 class TestOpenupgradelib(unittest.TestCase):
@@ -49,6 +66,92 @@ class TestOpenupgradelib(unittest.TestCase):
 
         migrate_with_cr(self.cr, "irrelevant.version")
         migrate_with_env(self.cr, "irrelevant.version")
+
+    def test_migrate_signature_odoo_18_and_later(self):
+        """Decorated migrate() must satisfy Odoo 18+ / 20.0 signature check.
+
+        The loader calls ``migrate(cr, version)`` and, since 18.0, rejects
+        any other positional parameter names. ``@wraps`` would expose the
+        wrapped names (often ``env``). Older Odoo only performs the call.
+        """
+        seen = []
+
+        @openupgrade.migrate(use_env=False)
+        def migrate_with_cr(cr, version):
+            seen.append(("cr", cr, version))
+
+        @openupgrade.migrate(use_env=True)
+        def migrate_with_env(env, version):
+            seen.append(("env", env, version))
+
+        @openupgrade.migrate()
+        def migrate_default(env, version):
+            seen.append(("default", env, version))
+
+        @openupgrade.migrate()
+        def migrate_annotated(env: object, version: str):
+            seen.append(("annotated", env, version))
+
+        @openupgrade.logging()
+        @openupgrade.migrate()
+        def migrate_logged(env, version):
+            seen.append(("logged", env, version))
+
+        @openupgrade.migrate()
+        def migrate_skip(env, version):
+            seen.append(("skip", version))
+
+        for func in (
+            migrate_with_cr,
+            migrate_with_env,
+            migrate_default,
+            migrate_annotated,
+            migrate_logged,
+            migrate_skip,
+        ):
+            self.assertTrue(
+                _accepted_by_odoo_migrate_loader(func),
+                inspect.signature(func),
+            )
+
+        # Odoo <= 17 calls positionally and does not inspect the signature.
+        migrate_with_cr(self.cr, "16.0.1.0.0")
+        migrate_with_cr(cr=self.cr, version="17.0.1.0.0")
+        migrate_with_env(self.cr, "18.0.1.0.0")
+        migrate_default(self.cr, "19.0.1.0.0")
+        migrate_annotated(self.cr, "20.0.1.0.0")
+        migrate_logged(self.cr, "20.0.1.0.1")
+        # Falsy version: script is skipped unless no_version=True.
+        migrate_skip(self.cr, None)
+        migrate_skip(self.cr, "")
+
+        self.assertEqual(seen[0], ("cr", self.cr, "16.0.1.0.0"))
+        self.assertEqual(seen[1], ("cr", self.cr, "17.0.1.0.0"))
+        self.assertIsInstance(seen[2][1], odoo.api.Environment)
+        self.assertIs(seen[2][1].cr, self.cr)
+        self.assertEqual(seen[2][2], "18.0.1.0.0")
+        self.assertEqual(
+            [entry[0] for entry in seen[3:]],
+            ["default", "annotated", "logged"],
+        )
+        for entry in seen[3:]:
+            if openupgrade.version_info[0] >= 10:
+                self.assertIsInstance(entry[1], odoo.api.Environment)
+                self.assertIs(entry[1].cr, self.cr)
+            else:
+                # use_env defaults to False before Odoo 10.
+                self.assertIs(entry[1], self.cr)
+        self.assertEqual(
+            [entry[2] for entry in seen[3:]],
+            ["19.0.1.0.0", "20.0.1.0.0", "20.0.1.0.1"],
+        )
+        self.assertEqual(len(seen), 6)
+
+        # Undecorated migrate(env, version) is still allow-listed on Odoo >= 18.
+        migration = getattr(odoo.modules, "migration", None)
+        params = getattr(migration, "VALID_MIGRATE_PARAMS", None)
+        if params is not None:
+            self.assertIn(("env", "version"), list(params))
 
     def test_delete_translations(self):
         record = self.env.ref("base.module_base")
